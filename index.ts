@@ -5,11 +5,18 @@ import * as pulumi from "@pulumi/pulumi";
 import * as iam from "./iam";
 import * as utils from "./utils";
 import * as k8s from "@pulumi/kubernetes";
+import * as helm from "@pulumi/kubernetes/helm";
 
 const projectName = pulumi.getProject();
 
-// Get the default VPC and the subnets
-const vpc = awsx.ec2.Vpc.getDefault();
+// Allocate a new VPC with custom settings, and a public & private subnet per AZ.
+const vpc = new awsx.ec2.Vpc(`${projectName}`, {
+    cidrBlock: "172.16.0.0/16",
+    subnets: [{ type: "public" }, { type: "private" }],
+});
+
+// Export VPC ID and Subnets.
+export const vpcId = vpc.id;
 export const allVpcSubnets = pulumi.all([vpc.privateSubnetIds, vpc.publicSubnetIds])
                             .apply(([privateSubnetIds, publicSubnetIds]) => privateSubnetIds.concat(publicSubnetIds));
 
@@ -20,7 +27,7 @@ const instanceProfiles = iam.createInstanceProfiles(projectName, roles);
 // Create an EKS cluster.
 const elkCluster = new eks.Cluster(`${projectName}`, {
     version: "1.22",
-    vpcId: vpc.id,
+    vpcId: vpcId,
     subnetIds: allVpcSubnets,
     nodeAssociatePublicIpAddress: false,
     skipDefaultNodeGroup: true,
@@ -49,29 +56,30 @@ const ngSmall = utils.createNodeGroup(`${projectName}-ng-small`, {
     instanceProfile: instanceProfiles[1],
 });
 
+const elkK8s = new k8s.Provider("elkK8s", {
+    kubeconfig: elkCluster.kubeconfig.apply(JSON.stringify),
+});
 
-const elastic = new k8s.helm.v3.Release("elastic", {
+const elastic = new helm.v2.Chart("elastic", {
+    //repo: "elastic",
     chart: "elasticsearch",
-    name: "elastic",
-    repositoryOpts: {
+    fetchOpts: {
         repo: "https://helm.elastic.co"
     }
-}, {dependsOn: elkCluster});
+}, { providers: { kubernetes: elkK8s } });
 
-const kibana = new k8s.helm.v3.Release("kibana", {
+const kibana = new helm.v2.Chart("kibana", {
+    //repo: "elastic",
     chart: "kibana",
-    name: "elastic",
-    repositoryOpts: {
+    fetchOpts: {
         repo: "https://helm.elastic.co",
-    },
-    version: "7.x"
-}, {dependsOn: elkCluster});
+    }
+}, { providers: { kubernetes: elkK8s }});
 
-const metricbeat = new k8s.helm.v3.Release("metricbeat", {
+const metricbeat = new helm.v2.Chart("metricbeat", {
+    //repo: "elastic",
     chart: "metricbeat",
-    name: "elastic",
-    repositoryOpts: {
+    fetchOpts: {
         repo: "https://helm.elastic.co",
-    },
-    version: "7.x"
-}, {dependsOn: elkCluster});
+    }
+}, { providers: { kubernetes: elkK8s }});
